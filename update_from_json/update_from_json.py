@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import discord
-from redbot.core import commands, checks, Red
+from redbot.core import commands, checks
+from redbot.core.bot import Red
 import logging
 
 logger = logging.getLogger("red.mihsef")

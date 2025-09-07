@@ -128,7 +128,16 @@ class MiHSEFSnapshot(commands.Cog):
         with open(fname, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        await ctx.send(f"✅ Snapshot saved: `{fname}`\nRoles: **{len(data['roles'])}** · Categories: **{len(data['categories'])}** · Channels: **{len(data['channels'])}**")
+        # Create a file attachment with a user-friendly name
+        attachment_filename = f"{guild.name}_snapshot_{ts}.json".replace(" ", "_").replace("/", "_")
+        file = discord.File(fname, filename=attachment_filename)
+
+        await ctx.send(
+            f"✅ Snapshot saved locally: `{fname}`\n"
+            f"Roles: **{len(data['roles'])}** · Categories: **{len(data['categories'])}** · Channels: **{len(data['channels'])}**\n"
+            f"JSON file attached below.",
+            file=file
+        )
 
     @snapshot.command(name="path")
     @checks.admin_or_permissions(manage_guild=True)

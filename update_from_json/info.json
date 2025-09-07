@@ -1,11 +1,11 @@
 {
   "name": "update_from_json",
-  "short": "Apply guild structure updates from a JSON snapshot",
-  "description": "Parses an uploaded JSON snapshot, previews changes, waits for ✅/❌ from the invoker, and applies role/category/channel updates with overwrites.",
+  "short": "MiHSEF snapshot & migration tools",
+  "description": "Provides MiHSEF server admin utilities. Commands: `!mihsef snapshot` to export roles/categories/channels/overwrites to JSON, and `!mihsef update_from_json` to preview and apply updates from a snapshot file.",
   "author": ["MiHSEF"],
   "min_bot_version": "3.5.0",
   "hidden": false,
-  "install_msg": "Loaded. Use `[p]mihsef update_from_json` with a snapshot JSON attached.",
-  "end_user_data_statement": "This cog reads an uploaded JSON of server structure. It does not store personal data.",
-  "tags": ["admin", "migration", "roles", "channels", "permissions"]
+  "install_msg": "Loaded. Use `!mihsef snapshot` to create a JSON backup and `!mihsef update_from_json` to apply one.",
+  "end_user_data_statement": "This cog writes and reads guild structure metadata (IDs, names, permissions) to/from JSON for backup and migration by server admins. It does not store or transmit end-user personal data.",
+  "tags": ["admin", "backup", "snapshot", "migration", "roles", "channels", "permissions"]
 }

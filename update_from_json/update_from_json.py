@@ -1,103 +1,278 @@
-# update_from_json.py
-# Red-DiscordBot Cog: "Update From JSON"
-# Features:
-# - !mihsef update_from_json  (attach a JSON snapshot file)
-# - Shows a preview summary (dry run)
-# - Adds ✅ / ❌ reactions. If the invoker reacts ✅, applies changes and posts a results summary.
+# Red-DiscordBot Cog: Unified MiHSEF tools
+# - !mihsef snapshot            -> dump roles/categories/channels/overwrites to JSON
+# - !mihsef update_from_json    -> preview + confirm, then apply JSON to the current guild
+#
 # Notes:
-# - Matches by NAME, not by ID. Use consistent naming between snapshot and target.
-# - v1 creates/updates roles, categories, channels, and permission overwrites.
-# - No deletions performed in v1 (safer). Add deletes later behind a flag if desired.
+# - Matches by NAME across servers (IDs differ). Overwrites attempt ID-first then fall back to ROLE NAME
+#   using the snapshot's roles list (id->name).
+# - v1 creates/updates roles, categories, channels, and overwrites. No deletions for safety.
+# - Stores snapshots in /data/mihsef_snapshots (good for Dockerized Red).
 
-import json
 import asyncio
-from typing import Dict, Tuple, List, Optional
+import datetime
+import json
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import discord
 from redbot.core import commands, checks
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, bold
 
 CHECK_MARK = "✅"
 CROSS_MARK = "❌"
 
-def _perm_overwrites_from_json(guild: discord.Guild, overwrites_json: Dict[str, Dict[str, Optional[bool]]]) -> Dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
+# ------------ helpers (mapping & utilities) ------------
+
+def _overwrite_to_dict(perms: discord.PermissionOverwrite) -> Dict[str, bool]:
     """
-    Convert snapshot overwrite schema to discord.PermissionOverwrite mapping.
-    Keys look like "role:<id>" or (potentially later) "member:<id>".
-    We match by role name if the role-id doesn't exist in target guild:
-      - Strategy: We can't know the role name from the key, so we only support role-id lookups
-        that exist *or* we skip. To support names, the JSON would need to carry names too.
-    Improvement: snapshot should carry overwrite subjects by *name* as well as by id.
+    Convert a PermissionOverwrite to a dict of {permission_name: True/False},
+    skipping entries that are None.
+    """
+    out = {}
+    for name, val in perms:
+        if val is not None:
+            out[name] = val
+    return out
+
+
+def _perm_overwrites_from_json(
+    guild: discord.Guild,
+    overwrites_json: Dict[str, Dict[str, Optional[bool]]],
+    snapshot_roles_by_id: Optional[Dict[int, str]] = None,
+) -> Dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
+    """
+    Convert snapshot overwrite schema to a mapping usable by Channel/Category .edit(overwrites=...).
+
+    Keys look like "role:<id>" or "member:<id>" (members are intentionally skipped in v1).
+    Strategy:
+      1) Try matching role by ID in the current guild.
+      2) If not found and we have a snapshot id->name table, try matching by NAME.
+      3) Special-case @everyone (role id == guild.id).
     """
     result = {}
-    for subject_key, perms in (overwrites_json or {}).items():
+    if not overwrites_json:
+        return result
+
+    for subject_key, perms_dict in overwrites_json.items():
         try:
             subject_type, raw_id = subject_key.split(":")
         except ValueError:
             continue
 
-        if subject_type == "role":
-            # Try by ID first; if not found, we can't map reliably by name without more data.
-            role = guild.get_role(int(raw_id))
-            # Fallback: try @everyone special-case
-            if role is None and raw_id == str(guild.id):
-                role = guild.default_role
-            if role is None:
-                # Skip unknown role-id; a future enhancement could include a name->id mapping table.
-                continue
-            # Build PermissionOverwrite
-            po = discord.PermissionOverwrite()
-            for attr, val in (perms or {}).items():
-                if not hasattr(po, attr):
-                    # Ignore unknown fields; JSON may include extras we don't map (ok)
-                    continue
-                setattr(po, attr, val)
-            result[role] = po
-
-        elif subject_type == "member":
-            # We do not auto-map members in v1 for safety (IDs differ cross-server). Skip.
+        if subject_type != "role":
+            # We don't apply member-specific overwrites cross-server in v1.
             continue
+
+        role: Optional[discord.Role] = None
+        # 1) Try ID
+        try:
+            rid = int(raw_id)
+            role = guild.get_role(rid)
+        except ValueError:
+            role = None
+
+        # 2) Special-case @everyone
+        if role is None and raw_id == str(guild.id):
+            role = guild.default_role
+
+        # 3) Fallback by NAME using snapshot table
+        if role is None and snapshot_roles_by_id:
+            try:
+                rid = int(raw_id)
+                snap_name = snapshot_roles_by_id.get(rid)
+                if snap_name:
+                    role = discord.utils.get(guild.roles, name=snap_name)
+            except ValueError:
+                pass
+
+        if role is None:
+            # Skip unknown roles; safer than guessing.
+            continue
+
+        po = discord.PermissionOverwrite()
+        for attr, val in (perms_dict or {}).items():
+            if hasattr(po, attr):
+                setattr(po, attr, val)
+        result[role] = po
 
     return result
 
-def _collect_current_named(guild: discord.Guild) -> Tuple[Dict[str, discord.Role], Dict[str, discord.CategoryChannel], Dict[str, discord.abc.GuildChannel]]:
+
+def _collect_current_named(
+    guild: discord.Guild,
+) -> Tuple[Dict[str, discord.Role], Dict[str, discord.CategoryChannel], Dict[str, discord.abc.GuildChannel]]:
     roles_by_name = {r.name: r for r in guild.roles}
     cats_by_name = {c.name: c for c in guild.categories}
-    chans_by_name = {c.name: c for c in guild.channels if isinstance(c, (discord.TextChannel, discord.VoiceChannel, discord.ForumChannel))}
+    chans_by_name = {
+        c.name: c for c in guild.channels if isinstance(c, (discord.TextChannel, discord.VoiceChannel, discord.ForumChannel))
+    }
     return roles_by_name, cats_by_name, chans_by_name
 
-def _role_position_plan(snapshot_roles: List[dict], guild: discord.Guild, roles_by_name: Dict[str, discord.Role]) -> List[Tuple[discord.Role, int]]:
+
+def _role_position_plan(
+    snapshot_roles: List[dict],
+    guild: discord.Guild,
+    roles_by_name: Dict[str, discord.Role],
+) -> List[Tuple[discord.Role, int]]:
     """
-    Compute desired role positions. Snapshot includes 'position' (descending in Discord UI).
-    We map by name. Missing roles will be created first, then positions adjusted.
-    Returns list for guild.edit_role_positions().
+    Compute desired role positions.
+    Snapshot includes 'position' (Discord-style integer). We'll attempt to honor it by matching role names.
     """
     plan = []
-    # Build a desired order by name -> target_position
-    # Note: Discord role positions are tricky; positions are relative. We normalize by index.
     snap_sorted = sorted(snapshot_roles, key=lambda r: r.get("position", 0))
     for snap in snap_sorted:
-        name = snap["name"]
-        if name in roles_by_name:
-            plan.append((roles_by_name[name], snap.get("position", roles_by_name[name].position)))
+        name = snap.get("name")
+        if not name:
+            continue
+        role = roles_by_name.get(name)
+        if role:
+            plan.append((role, snap.get("position", role.position)))
     return plan
 
+
+def _resolve_parent_category(
+    snap_ch: dict,
+    cats_by_name: Dict[str, discord.CategoryChannel],
+    snapshot_categories_by_id: Dict[int, str],
+) -> Optional[discord.CategoryChannel]:
+    """
+    Resolve the correct CategoryChannel object in the current guild for a snapshot channel.
+    Prefer mapping parent_id->snapshot_name, then find that name in current guild.
+    """
+    parent_id = snap_ch.get("parent_id")
+    if not parent_id:
+        return None
+    try:
+        pid = int(parent_id)
+    except Exception:
+        return None
+    snap_cat_name = snapshot_categories_by_id.get(pid)
+    if not snap_cat_name:
+        return None
+    return cats_by_name.get(snap_cat_name)
+
+
+# ------------ the cog ------------
+
 class UpdateFromJSON(commands.Cog):
-    """Apply guild structure updates from a JSON snapshot (roles/categories/channels/overwrites)."""
+    """MiHSEF: snapshot current guild and apply updates from a JSON snapshot (roles/categories/channels/overwrites)."""
 
     def __init__(self, bot: Red):
         self.bot = bot
 
+    # ---------- GROUP ----------
+
     @commands.group(name="mihsef")
     @checks.admin_or_permissions(manage_guild=True)
     async def mihsef_group(self, ctx: commands.Context):
-        """MIHSEF utilities."""
+        """MiHSEF utilities (snapshot / migration)."""
         pass
+
+    # ---------- SNAPSHOT ----------
+
+    @mihsef_group.command(name="snapshot")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def snapshot_now(self, ctx: commands.Context):
+        """
+        Snapshot the current guild (roles/categories/channels/overwrites) to a JSON file,
+        save it in /data/mihsef_snapshots and upload it.
+        """
+        guild = ctx.guild
+        data = {
+            "meta": {
+                "guild_id": guild.id,
+                "guild_name": guild.name,
+                "snapshot_at": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "owner_id": guild.owner_id,
+            },
+            "roles": [],
+            "categories": [],
+            "channels": [],
+        }
+
+        # Roles
+        for r in guild.roles:
+            data["roles"].append({
+                "id": r.id,
+                "name": r.name,
+                "position": r.position,
+                "color": r.color.value,
+                "hoist": r.hoist,
+                "mentionable": r.mentionable,
+                "managed": r.managed,
+                "permissions": r.permissions.value,
+            })
+
+        # Categories
+        for c in guild.categories:
+            overwrites = {}
+            for target, perms in c.overwrites.items():
+                key = f"role:{target.id}" if isinstance(target, discord.Role) else f"member:{target.id}"
+                overwrites[key] = _overwrite_to_dict(perms)
+            data["categories"].append({
+                "id": c.id,
+                "name": c.name,
+                "position": c.position,
+                "nsfw": getattr(c, "nsfw", False) or getattr(c, "is_nsfw", lambda: False)(),
+                "overwrites": overwrites,
+            })
+
+        # Channels (text/voice/forum)
+        for ch in guild.channels:
+            if isinstance(ch, discord.CategoryChannel):
+                continue
+            overwrites = {}
+            for target, perms in ch.overwrites.items():
+                key = f"role:{target.id}" if isinstance(target, discord.Role) else f"member:{target.id}"
+                overwrites[key] = _overwrite_to_dict(perms)
+
+            if isinstance(ch, discord.VoiceChannel):
+                ch_type = "voice"
+                topic = None
+                nsfw = False
+                slowmode = 0
+            elif isinstance(ch, discord.ForumChannel):
+                ch_type = "forum"
+                topic = getattr(ch, "topic", None)
+                nsfw = getattr(ch, "nsfw", False)
+                slowmode = getattr(ch, "slowmode_delay", 0)
+            else:
+                ch_type = "text"
+                topic = getattr(ch, "topic", None)
+                nsfw = getattr(ch, "nsfw", False)
+                slowmode = getattr(ch, "slowmode_delay", 0)
+
+            data["channels"].append({
+                "id": ch.id,
+                "name": ch.name,
+                "type": ch_type,
+                "position": ch.position,
+                "parent_id": ch.category_id,
+                "overwrites": overwrites,
+                "nsfw": nsfw,
+                "slowmode_delay": slowmode,
+                "topic": topic,
+            })
+
+        # Save & upload
+        outdir = Path("/data/mihsef_snapshots")
+        outdir.mkdir(parents=True, exist_ok=True)
+        filename = f"{guild.name.replace(' ', '_')}_snapshot_{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%S')}Z.json"
+        filepath = outdir / filename
+
+        with filepath.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        try:
+            await ctx.send(f"Snapshot saved: `{filename}`", file=discord.File(str(filepath)))
+        except Exception:
+            await ctx.send(f"Snapshot saved to `{filepath}` (upload failed).")
+
+    # ---------- UPDATE FROM JSON ----------
 
     @mihsef_group.command(name="update_from_json")
     @checks.admin_or_permissions(manage_guild=True)
-    async def update_from_json(self, ctx: commands.Context):
+    async def update_from_json_cmd(self, ctx: commands.Context):
         """
         Use with a JSON snapshot attached.
         Flow: parse -> preview summary -> add ✅/❌ -> on ✅ apply changes -> final summary.
@@ -109,7 +284,6 @@ class UpdateFromJSON(commands.Cog):
         if not att.filename.lower().endswith(".json"):
             return await ctx.send("The attachment must be a .json file.")
 
-        # Download & parse JSON
         raw = await att.read()
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -118,47 +292,55 @@ class UpdateFromJSON(commands.Cog):
 
         guild: discord.Guild = ctx.guild
 
-        # Pull sections we support
-        snap_roles = data.get("roles", [])
-        snap_categories = data.get("categories", [])
-        snap_channels = data.get("channels", [])
+        snap_roles: List[dict] = data.get("roles", [])
+        snap_categories: List[dict] = data.get("categories", [])
+        snap_channels: List[dict] = data.get("channels", [])
+
+        snapshot_roles_by_id = {}
+        for r in snap_roles:
+            rid = r.get("id")
+            name = r.get("name")
+            if isinstance(rid, int) and isinstance(name, str):
+                snapshot_roles_by_id[rid] = name
+
+        snapshot_categories_by_id = {}
+        for c in snap_categories:
+            cid = c.get("id")
+            name = c.get("name")
+            if isinstance(cid, int) and isinstance(name, str):
+                snapshot_categories_by_id[cid] = name
 
         roles_by_name, cats_by_name, chans_by_name = _collect_current_named(guild)
 
-        # PREVIEW: build a change summary
-        creates_roles = []
-        updates_roles = []
+        # ------- Build preview -------
+        creates_roles, updates_roles = [], []
         for r in snap_roles:
-            name = r["name"]
-            if name == "@everyone":
+            name = r.get("name")
+            if not name or name == "@everyone":
                 continue
-            if name not in roles_by_name:
+            cur = roles_by_name.get(name)
+            if cur is None:
                 creates_roles.append(name)
             else:
-                # simplistic: if color/hoist/mentionable differ, mark update
-                cur = roles_by_name[name]
-                if (cur.color.value != r.get("color", 0)
-                    or cur.hoist != r.get("hoist", False)
-                    or cur.mentionable != r.get("mentionable", False)):
+                if (
+                    cur.color.value != r.get("color", cur.color.value)
+                    or cur.hoist != r.get("hoist", cur.hoist)
+                    or cur.mentionable != r.get("mentionable", cur.mentionable)
+                ):
                     updates_roles.append(name)
 
-        creates_cats = []
-        for c in snap_categories:
-            name = c["name"]
-            if name not in cats_by_name:
-                creates_cats.append(name)
+        creates_cats = [c["name"] for c in snap_categories if c.get("name") not in cats_by_name]
 
-        creates_chans = []
-        overwrite_updates = []
+        creates_chans, overwrite_updates = [], []
         for ch in snap_channels:
-            name = ch["name"]
+            name = ch.get("name")
+            if not name:
+                continue
             if name not in chans_by_name:
                 creates_chans.append(name)
             else:
-                # mark that we'll update topic/nsfw/slowmode + overwrites
                 overwrite_updates.append(name)
 
-        # Show preview embed
         desc_lines = []
         if creates_roles:
             desc_lines.append(f"**Create Roles:** {', '.join(creates_roles)}")
@@ -169,8 +351,9 @@ class UpdateFromJSON(commands.Cog):
         if creates_chans:
             desc_lines.append(f"**Create Channels:** {', '.join(creates_chans)}")
         if overwrite_updates:
-            desc_lines.append(f"**Update Overwrites/Props (channels):** {', '.join(overwrite_updates[:10])}" + (" …" if len(overwrite_updates) > 10 else ""))
-
+            head = ", ".join(overwrite_updates[:10])
+            tail = " …" if len(overwrite_updates) > 10 else ""
+            desc_lines.append(f"**Update Overwrites/Props (channels):** {head}{tail}")
         if not desc_lines:
             desc_lines.append("No changes detected (based on name matching).")
 
@@ -195,22 +378,29 @@ class UpdateFromJSON(commands.Cog):
             )
 
         try:
-            reaction, user = await self.bot.wait_for("reaction_add", timeout=120.0, check=check)
+            reaction, _ = await self.bot.wait_for("reaction_add", timeout=180.0, check=check)
         except asyncio.TimeoutError:
             return await ctx.send("Timed out. No changes applied.")
 
         if str(reaction.emoji) == CROSS_MARK:
             return await ctx.send("Cancelled. No changes applied.")
 
-        # APPLY CHANGES
-        results = {"roles_created": 0, "roles_updated": 0, "role_position_updates": 0,
-                   "categories_created": 0, "channels_created": 0, "channel_updates": 0, "errors": 0}
-        # 1) Ensure roles exist / update basic props
+        # ------- APPLY -------
+        results = {
+            "roles_created": 0,
+            "roles_updated": 0,
+            "role_position_updates": 0,
+            "categories_created": 0,
+            "channels_created": 0,
+            "channel_updates": 0,
+            "errors": 0,
+        }
+
+        # 1) Roles (create/update basic props)
         try:
             for r in snap_roles:
-                name = r["name"]
-                if name == "@everyone":
-                    # optionally: adjust default perms via role.edit(permissions=...)
+                name = r.get("name")
+                if not name or name == "@everyone":
                     continue
 
                 role = roles_by_name.get(name)
@@ -220,7 +410,7 @@ class UpdateFromJSON(commands.Cog):
                         colour=discord.Colour(r.get("color", 0)),
                         hoist=r.get("hoist", False),
                         mentionable=r.get("mentionable", False),
-                        reason="UpdateFromJSON: create role",
+                        reason="MiHSEF update_from_json: create role",
                     )
                     roles_by_name[name] = role
                     results["roles_created"] += 1
@@ -235,11 +425,11 @@ class UpdateFromJSON(commands.Cog):
                             colour=discord.Colour(r.get("color", role.color.value)),
                             hoist=r.get("hoist", role.hoist),
                             mentionable=r.get("mentionable", role.mentionable),
-                            reason="UpdateFromJSON: update role",
+                            reason="MiHSEF update_from_json: update role",
                         )
                         results["roles_updated"] += 1
-            # Role positions
-            # Refresh roles_by_name (new roles added)
+
+            # Role positions (best effort)
             roles_by_name, _, _ = _collect_current_named(guild)
             pos_plan = _role_position_plan(snap_roles, guild, roles_by_name)
             if pos_plan:
@@ -248,60 +438,70 @@ class UpdateFromJSON(commands.Cog):
                     await guild.edit_role_positions(positions=mapping)
                     results["role_position_updates"] = len(mapping)
                 except Exception:
-                    # Not fatal; permissions may restrict moving managed roles, etc.
+                    # Non-fatal: managed roles or permission constraints can block some moves.
                     pass
         except Exception:
             results["errors"] += 1
 
-        # 2) Ensure categories
+        # 2) Categories (create + overwrites)
         try:
-            # Create missing categories first
             for c in snap_categories:
-                name = c["name"]
+                name = c.get("name")
+                if not name:
+                    continue
                 if name not in cats_by_name:
-                    cat = await guild.create_category(name=name, reason="UpdateFromJSON: create category")
+                    cat = await guild.create_category(
+                        name=name, reason="MiHSEF update_from_json: create category"
+                    )
                     cats_by_name[name] = cat
                     results["categories_created"] += 1
 
-            # Apply category overwrites when possible (role-id based; best effort)
+            # Overwrites
             for c in snap_categories:
-                name = c["name"]
+                name = c.get("name")
+                if not name:
+                    continue
                 cat = cats_by_name.get(name)
                 if not cat:
                     continue
-                overwrites = _perm_overwrites_from_json(guild, c.get("overwrites"))
+                overwrites = _perm_overwrites_from_json(
+                    guild, c.get("overwrites"), snapshot_roles_by_id
+                )
                 if overwrites:
                     try:
-                        await cat.edit(overwrites=overwrites, reason="UpdateFromJSON: category overwrites")
+                        await cat.edit(overwrites=overwrites, reason="MiHSEF: category overwrites")
                     except Exception:
                         results["errors"] += 1
         except Exception:
             results["errors"] += 1
 
-        # 3) Ensure channels (+ basic props + overwrites)
+        # 3) Channels (create/update props + overwrites)
         try:
             for ch in snap_channels:
-                name = ch["name"]
+                name = ch.get("name")
+                if not name:
+                    continue
                 ch_type = ch.get("type", "text")
-                parent_id = ch.get("parent_id")
-                parent_obj = None
-
-                # Prefer parent *name* from snapshot if available (not provided in v1), else map known IDs to names manually if you extend snapshot.
-                # Here we match parent by ID -> name only if ID matches an existing category (rare across servers).
-                for cat in cats_by_name.values():
-                    if str(cat.id) == str(parent_id) or cat.name in (c["name"] for c in snap_categories if c["id"] == parent_id):
-                        parent_obj = cat
-                        break
+                parent_obj = _resolve_parent_category(ch, cats_by_name, snapshot_categories_by_id)
 
                 existing = chans_by_name.get(name)
                 if existing is None:
-                    # create
+                    # Create
                     if ch_type == "voice":
-                        created = await guild.create_voice_channel(name=name, category=parent_obj, reason="UpdateFromJSON: create voice")
+                        created = await guild.create_voice_channel(
+                            name=name, category=parent_obj, reason="MiHSEF: create voice"
+                        )
+                    elif ch_type == "forum":
+                        # Basic forum create; detailed forum settings are out-of-scope in v1
+                        created = await guild.create_forum_channel(
+                            name=name, category=parent_obj, reason="MiHSEF: create forum"
+                        )
                     else:
-                        created = await guild.create_text_channel(name=name, category=parent_obj, reason="UpdateFromJSON: create text")
+                        created = await guild.create_text_channel(
+                            name=name, category=parent_obj, reason="MiHSEF: create text"
+                        )
                         # text-specific props
-                        if "topic" in ch and ch["topic"]:
+                        if "topic" in ch and ch["topic"] is not None:
                             try:
                                 await created.edit(topic=ch["topic"])
                             except Exception:
@@ -319,20 +519,24 @@ class UpdateFromJSON(commands.Cog):
                     chans_by_name[name] = created
                     results["channels_created"] += 1
                 else:
-                    # update props
+                    # Update props
                     try:
                         kwargs = {}
+                        # Move into correct category if needed
+                        if parent_obj and existing.category != parent_obj:
+                            kwargs["category"] = parent_obj
+
                         if isinstance(existing, discord.TextChannel):
-                            if "topic" in ch and (existing.topic or "") != (ch["topic"] or ""):
-                                kwargs["topic"] = ch["topic"]
+                            topic = ch.get("topic")
+                            if topic is not None and (existing.topic or "") != (topic or ""):
+                                kwargs["topic"] = topic
                             if "nsfw" in ch and existing.nsfw != bool(ch["nsfw"]):
                                 kwargs["nsfw"] = bool(ch["nsfw"])
                             if "slowmode_delay" in ch and existing.slowmode_delay != int(ch["slowmode_delay"]):
                                 kwargs["slowmode_delay"] = int(ch["slowmode_delay"])
-                        if parent_obj and existing.category != parent_obj:
-                            kwargs["category"] = parent_obj
+
                         if kwargs:
-                            await existing.edit(**kwargs, reason="UpdateFromJSON: channel props")
+                            await existing.edit(**kwargs, reason="MiHSEF: channel props")
                         results["channel_updates"] += 1
                     except Exception:
                         results["errors"] += 1
@@ -340,16 +544,19 @@ class UpdateFromJSON(commands.Cog):
                 # Overwrites
                 target = chans_by_name.get(name)
                 if target:
-                    overwrites = _perm_overwrites_from_json(guild, ch.get("overwrites"))
+                    overwrites = _perm_overwrites_from_json(
+                        guild, ch.get("overwrites"), snapshot_roles_by_id
+                    )
                     if overwrites:
                         try:
-                            await target.edit(overwrites=overwrites, reason="UpdateFromJSON: channel overwrites")
+                            await target.edit(overwrites=overwrites, reason="MiHSEF: channel overwrites")
                         except Exception:
                             results["errors"] += 1
+
         except Exception:
             results["errors"] += 1
 
-        # FINAL SUMMARY
+        # ------- FINAL SUMMARY -------
         lines = [
             f"Roles created: {results['roles_created']}",
             f"Roles updated: {results['roles_updated']}",
@@ -359,11 +566,10 @@ class UpdateFromJSON(commands.Cog):
             f"Channels updated/overwrites set: {results['channel_updates']}",
             f"Errors: {results['errors']}",
         ]
-        await ctx.send(embed=discord.Embed(
-            title="Update From JSON — Completed",
-            description="\n".join(lines),
-            color=discord.Color.green() if results["errors"] == 0 else discord.Color.orange()
-        ))
-
-async def setup(bot: Red):
-    await bot.add_cog(UpdateFromJSON(bot))
+        await ctx.send(
+            embed=discord.Embed(
+                title="Update From JSON — Completed",
+                description="\n".join(lines),
+                color=discord.Color.green() if results["errors"] == 0 else discord.Color.orange(),
+            )
+        )

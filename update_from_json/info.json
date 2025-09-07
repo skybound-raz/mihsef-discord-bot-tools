@@ -1,0 +1,11 @@
+{
+  "name": "update_from_json",
+  "short": "Apply guild structure updates from a JSON snapshot",
+  "description": "Parses an uploaded JSON snapshot, previews changes, waits for ✅/❌ from the invoker, and applies role/category/channel updates with overwrites.",
+  "author": ["MiHSEF"],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "install_msg": "Loaded. Use `[p]mihsef update_from_json` with a snapshot JSON attached.",
+  "end_user_data_statement": "This cog reads an uploaded JSON of server structure. It does not store personal data.",
+  "tags": ["admin", "migration", "roles", "channels", "permissions"]
+}

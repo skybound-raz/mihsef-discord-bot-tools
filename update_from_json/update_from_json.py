@@ -38,7 +38,7 @@ def _overwrite_to_dict(perms: discord.PermissionOverwrite) -> Dict[str, bool]:
 def _perm_overwrites_from_json(
     guild: discord.Guild,
     overwrites_json: Dict[str, Dict[str, Optional[bool]]],
-    snapshot_roles_by_id: Optional[Dict[int, str]] = Null,
+    snapshot_roles_by_id: Optional[Dict[int, str]] = None,
 ) -> Dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
     """
     Convert snapshot overwrite schema to a mapping usable by Channel/Category .edit(overwrites=...).

@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import discord
-from redbot.core import commands, checks
+from redbot.core import commands, checks, log
 from redbot.core.bot import Red
+
+logger = log.get_logger("mihsef")
 
 CHECK_MARK = "✅"
 CROSS_MARK = "❌"
@@ -29,19 +31,24 @@ def _overwrite_to_dict(perms: discord.PermissionOverwrite) -> Dict[str, bool]:
     skipping entries that are None.
     """
     out = {}
-    # List of known permission attributes (Discord.py 1.x compatible)
+    # Complete list of known permission attributes (compatible with Discord.py 1.x and 2.x)
     permission_attrs = [
         "create_instant_invite", "kick_members", "ban_members", "administrator",
         "manage_channels", "manage_guild", "add_reactions", "view_audit_log",
-        "priority_speaker", "stream", "view_channel", "send_messages",
-        "send_tts_messages", "manage_messages", "embed_links", "attach_files",
-        "read_message_history", "mention_everyone", "use_external_emojis",
-        "view_guild_insights", "connect", "speak", "mute_members", "deafen_members",
-        "move_members", "use_voice_activation", "change_nickname", "manage_nicknames",
-        "manage_roles", "manage_webhooks", "manage_emojis", "use_slash_commands",
-        "request_to_speak", "manage_events", "manage_threads", "use_public_threads",
-        "use_private_threads", "use_external_stickers", "send_messages_in_threads",
-        "use_embedded_activities", "moderate_members"
+        "priority_speaker", "stream", "read_messages", "view_channel",
+        "send_messages", "send_tts_messages", "manage_messages", "embed_links",
+        "attach_files", "read_message_history", "mention_everyone",
+        "use_external_emojis", "external_emojis", "view_guild_insights",
+        "connect", "speak", "mute_members", "deafen_members",
+        "move_members", "use_voice_activation", "change_nickname",
+        "manage_nicknames", "manage_roles", "manage_webhooks",
+        "manage_emojis", "use_slash_commands", "use_application_commands",
+        "request_to_speak", "manage_events", "manage_threads",
+        "create_public_threads", "use_public_threads", "create_private_threads",
+        "use_private_threads", "use_external_stickers", "external_stickers",
+        "send_messages_in_threads", "use_embedded_activities", "moderate_members",
+        "create_events", "send_polls", "use_external_apps", "use_external_sounds",
+        "use_soundboard", "send_voice_messages"
     ]
     for attr in permission_attrs:
         value = getattr(perms, attr, None)
@@ -358,6 +365,7 @@ class UpdateFromJSON(commands.Cog):
                     if isinstance(target, discord.Role):
                         current_overwrites[f"role:{target.id}"] = _overwrite_to_dict(perms)
                 snapshot_overwrites = ch.get("overwrites", {})
+                logger.debug(f"Channel {name}: Current overwrites: {current_overwrites}, Snapshot overwrites: {snapshot_overwrites}")
                 if (
                     cur.position != ch.get("position", cur.position)
                     or cur.category_id != ch.get("parent_id")

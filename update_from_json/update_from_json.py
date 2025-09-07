@@ -29,9 +29,24 @@ def _overwrite_to_dict(perms: discord.PermissionOverwrite) -> Dict[str, bool]:
     skipping entries that are None.
     """
     out = {}
-    for name, value in perms.pairwise():  # Use pairwise() for PermissionOverwrite
+    # List of known permission attributes (Discord.py 1.x compatible)
+    permission_attrs = [
+        "create_instant_invite", "kick_members", "ban_members", "administrator",
+        "manage_channels", "manage_guild", "add_reactions", "view_audit_log",
+        "priority_speaker", "stream", "view_channel", "send_messages",
+        "send_tts_messages", "manage_messages", "embed_links", "attach_files",
+        "read_message_history", "mention_everyone", "use_external_emojis",
+        "view_guild_insights", "connect", "speak", "mute_members", "deafen_members",
+        "move_members", "use_voice_activation", "change_nickname", "manage_nicknames",
+        "manage_roles", "manage_webhooks", "manage_emojis", "use_slash_commands",
+        "request_to_speak", "manage_events", "manage_threads", "use_public_threads",
+        "use_private_threads", "use_external_stickers", "send_messages_in_threads",
+        "use_embedded_activities", "moderate_members"
+    ]
+    for attr in permission_attrs:
+        value = getattr(perms, attr, None)
         if value is not None:
-            out[name] = value
+            out[attr] = value
     return out
 
 

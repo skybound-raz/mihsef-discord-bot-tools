@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import discord
-from redbot.core import commands, checks
+from redbot.core import commands, checks, Red
 import logging
 
 logger = logging.getLogger("red.mihsef")
@@ -306,7 +306,7 @@ class UpdateFromJSON(commands.Cog):
         if not att.filename.lower().endswith(".json"):
             return await ctx.send("The attachment must be a .json file.")
 
-        raw = att.read()
+        raw = await att.read()
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception as e:

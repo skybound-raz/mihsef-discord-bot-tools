@@ -1,0 +1,11 @@
+{
+  "name": "mihsef_snapshot",
+  "short": "MiHSEF snapshot & tools",
+  "description": "Snapshot guild roles/channels/overwrites to JSON and provide stepwise admin helpers.",
+  "author": ["MiHSEF"],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "install_msg": "MiHSEF Snapshot loaded. Use `[p]mihsef snapshot now` to write a JSON backup.",
+  "end_user_data_statement": "This cog writes server structure metadata (IDs, names, permissions) to /data/mihsef_snapshots for backup/restore by server admins.",
+  "tags": ["admin", "backup", "snapshot", "migration"]
+}

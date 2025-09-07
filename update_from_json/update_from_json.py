@@ -5,7 +5,7 @@
 # Notes:
 # - Matches by NAME across servers (IDs differ). Overwrites attempt ID-first then fall back to ROLE NAME
 #   using the snapshot's roles list (id->name).
-# - v1 creates/updates roles, categories, channels, and overwrites. No deletions for safety.
+# - v1 creates/updates roles, categories, channels, and overwrites. Now includes safe role deletion.
 # - Stores snapshots in /data/mihsef_snapshots (good for Dockerized Red).
 
 import asyncio
@@ -38,7 +38,7 @@ def _overwrite_to_dict(perms: discord.PermissionOverwrite) -> Dict[str, bool]:
 def _perm_overwrites_from_json(
     guild: discord.Guild,
     overwrites_json: Dict[str, Dict[str, Optional[bool]]],
-    snapshot_roles_by_id: Optional[Dict[int, str]] = None,
+    snapshot_roles_by_id: Optional[Dict[int, str]] = Null,
 ) -> Dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
     """
     Convert snapshot overwrite schema to a mapping usable by Channel/Category .edit(overwrites=...).
@@ -393,6 +393,7 @@ class UpdateFromJSON(commands.Cog):
             "categories_created": 0,
             "channels_created": 0,
             "channel_updates": 0,
+            "roles_deleted": 0,
             "errors": 0,
         }
 
@@ -440,6 +441,18 @@ class UpdateFromJSON(commands.Cog):
                 except Exception:
                     # Non-fatal: managed roles or permission constraints can block some moves.
                     pass
+
+            # Delete roles not in the snapshot (skip @everyone and managed roles)
+            existing_roles = {r.name: r for r in guild.roles}
+            snapshot_role_names = {r.get("name") for r in snap_roles}
+            roles_to_delete = [r for n, r in existing_roles.items() if n not in snapshot_role_names and n != "@everyone" and not r.managed]
+            for role in roles_to_delete:
+                try:
+                    await role.delete(reason="MiHSEF update_from_json: remove unused role")
+                    results["roles_deleted"] += 1
+                except Exception:
+                    results["errors"] += 1
+
         except Exception:
             results["errors"] += 1
 
@@ -564,6 +577,7 @@ class UpdateFromJSON(commands.Cog):
             f"Categories created: {results['categories_created']}",
             f"Channels created: {results['channels_created']}",
             f"Channels updated/overwrites set: {results['channel_updates']}",
+            f"Roles deleted: {results['roles_deleted']}",
             f"Errors: {results['errors']}",
         ]
         await ctx.send(

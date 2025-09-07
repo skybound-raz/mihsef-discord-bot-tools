@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import discord
-from redbot.core import commands, checks, log
-from redbot.core.bot import Red
+from redbot.core import commands, checks
+import logging
 
-logger = log.get_logger("mihsef")
+logger = logging.getLogger("red.mihsef")
 
 CHECK_MARK = "✅"
 CROSS_MARK = "❌"
@@ -306,7 +306,7 @@ class UpdateFromJSON(commands.Cog):
         if not att.filename.lower().endswith(".json"):
             return await ctx.send("The attachment must be a .json file.")
 
-        raw = await att.read()
+        raw = att.read()
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception as e:

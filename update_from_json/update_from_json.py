@@ -29,9 +29,9 @@ def _overwrite_to_dict(perms: discord.PermissionOverwrite) -> Dict[str, bool]:
     skipping entries that are None.
     """
     out = {}
-    for name, val in perms:
-        if val is not None:
-            out[name] = val
+    for name, value in perms.pairwise():  # Use pairwise() for PermissionOverwrite
+        if value is not None:
+            out[name] = value
     return out
 
 
@@ -337,12 +337,18 @@ class UpdateFromJSON(commands.Cog):
             if not name:
                 continue
             cur = chans_by_name.get(name)
-            if cur and (
-                cur.position != ch.get("position", cur.position)
-                or cur.category_id != ch.get("parent_id")
-                or _overwrite_to_dict(cur.overwrites) != ch.get("overwrites", {})
-            ):
-                overwrite_updates.append(name)
+            if cur:
+                current_overwrites = {}
+                for target, perms in cur.overwrites.items():
+                    if isinstance(target, discord.Role):
+                        current_overwrites[f"role:{target.id}"] = _overwrite_to_dict(perms)
+                snapshot_overwrites = ch.get("overwrites", {})
+                if (
+                    cur.position != ch.get("position", cur.position)
+                    or cur.category_id != ch.get("parent_id")
+                    or current_overwrites != snapshot_overwrites
+                ):
+                    overwrite_updates.append(name)
 
         desc_lines = []
         if creates_roles:

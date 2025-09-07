@@ -321,24 +321,27 @@ class UpdateFromJSON(commands.Cog):
             cur = roles_by_name.get(name)
             if cur is None:
                 creates_roles.append(name)
-            else:
-                if (
-                    cur.color.value != r.get("color", cur.color.value)
-                    or cur.hoist != r.get("hoist", cur.hoist)
-                    or cur.mentionable != r.get("mentionable", cur.mentionable)
-                ):
-                    updates_roles.append(name)
+            elif (
+                cur.color.value != r.get("color", cur.color.value)
+                or cur.hoist != r.get("hoist", cur.hoist)
+                or cur.mentionable != r.get("mentionable", cur.mentionable)
+                or cur.permissions.value != r.get("permissions", cur.permissions.value)
+            ):
+                updates_roles.append(name)
 
         creates_cats = [c["name"] for c in snap_categories if c.get("name") not in cats_by_name]
-
-        creates_chans, overwrite_updates = [], []
+        creates_chans = [ch["name"] for ch in snap_channels if ch.get("name") not in chans_by_name]
+        overwrite_updates = []
         for ch in snap_channels:
             name = ch.get("name")
             if not name:
                 continue
-            if name not in chans_by_name:
-                creates_chans.append(name)
-            else:
+            cur = chans_by_name.get(name)
+            if cur and (
+                cur.position != ch.get("position", cur.position)
+                or cur.category_id != ch.get("parent_id")
+                or _overwrite_to_dict(cur.overwrites) != ch.get("overwrites", {})
+            ):
                 overwrite_updates.append(name)
 
         desc_lines = []
@@ -351,24 +354,28 @@ class UpdateFromJSON(commands.Cog):
         if creates_chans:
             desc_lines.append(f"**Create Channels:** {', '.join(creates_chans)}")
         if overwrite_updates:
-            head = ", ".join(overwrite_updates[:10])
-            tail = " …" if len(overwrite_updates) > 10 else ""
+            head = ", ".join(overwrite_updates[:50])  # Increased limit to 50
+            tail = " …" if len(overwrite_updates) > 50 else ""
             desc_lines.append(f"**Update Overwrites/Props (channels):** {head}{tail}")
         if not desc_lines:
-            desc_lines.append("No changes detected (based on name matching).")
+            desc_lines.append("No changes detected (based on name and attributes).")
 
         preview = discord.Embed(
             title="Update From JSON — Preview",
             description="\n".join(desc_lines),
             color=discord.Color.blurple(),
         )
-        preview.set_footer(text="React ✅ to apply, ❌ to cancel (invoker only).")
-        msg = await ctx.send(embed=preview)
-        for r in (CHECK_MARK, CROSS_MARK):
-            try:
-                await msg.add_reaction(r)
-            except discord.HTTPException:
-                pass
+        if desc_lines[0] != "No changes detected (based on name and attributes).":
+            preview.set_footer(text="React ✅ to apply, ❌ to cancel (invoker only).")
+            msg = await ctx.send(embed=preview)
+            for r in (CHECK_MARK, CROSS_MARK):
+                try:
+                    await msg.add_reaction(r)
+                except discord.HTTPException:
+                    pass
+        else:
+            await ctx.send(embed=preview)
+            return  # Exit early if no changes
 
         def check(reaction: discord.Reaction, user: discord.User):
             return (

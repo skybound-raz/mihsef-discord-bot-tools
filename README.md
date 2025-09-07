@@ -1,20 +1,12 @@
 # MiHSEF Discord Bot Tools
-
-This repo contains Red-DiscordBot cogs for MiHSEF. The `mihsef_snapshot` cog lets you snapshot the current guild (roles, channels, categories, overwrites) to JSON in `/data/mihsef_snapshots`.
+Tools for the MiHSEF Discord bot, including guild snapshot and update functionality.
 
 ## Install (Red)
-1) Load downloader:
-  ~load downloader
-
-2) Add this repo (public or private—see below):
-  ~repo add MiHSEFTools https://github.com/skybound-raz/mihsef-discord-bot-tools
-
-3) Install + load the cog:
-  ~cog install MiHSEFTools mihsef_snapshot
-  ~load mihsef_snapshot
+1. Load downloader: `!load downloader`
+2. Add repo: `!repo add MiHSEFTools https://github.com/skybound-raz/mihsef-discord-bot-tools`
+3. Install cog: `!cog install MiHSEFTools update_from_json`
+4. Load cog: `!load update_from_json`
 
 ## Use
-
-~mihsef snapshot now
-~mihsef snapshot path
-## Testing Edit
+- `!mihsef snapshot`: Save guild structure to JSON and upload.
+- `!mihsef update_from_json`: Apply changes from an attached JSON snapshot.
